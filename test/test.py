@@ -1,51 +1,64 @@
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge
 
-LOAD, ADD, SUB, AND, OR, XOR, SHL, SHR = range(8)
-GO = 1 << 3
+from assembler import INSTRUCTIONS, assemble
+
+PROGRAMS = os.path.join(os.path.dirname(__file__), "programs")
+TWO_BYTE = {code >> 4 for code, kind in INSTRUCTIONS.values() if kind == "imm"}
 
 
-async def press(dut, op, b, want, want_carry):
-    """Set an operation and number, tick the clock once, check the display."""
-    dut.ui_in.value = b
-    dut.uio_in.value = GO | op
-    await ClockCycles(dut.clk, 1)
-    dut.uio_in.value = 0  # release "go" so nothing changes until the next press
-    await ClockCycles(dut.clk, 1)
-    acc = int(dut.uo_out.value)
-    carry = (int(dut.uio_out.value) >> 4) & 1
-    zero = (int(dut.uio_out.value) >> 5) & 1
-    dut._log.info(f"op={op} b={b:3d} -> acc={acc:3d} carry={carry} zero={zero}")
-    assert acc == want, f"acc={acc}, expected {want}"
-    assert carry == want_carry, f"carry={carry}, expected {want_carry}"
-    assert zero == (want == 0)
+def instruction_addresses(rom, opcode_byte):
+    """Addresses where a given 1-byte instruction starts (skipping over immediates)."""
+    found, addr = set(), 0
+    while addr < len(rom):
+        if rom[addr] == opcode_byte:
+            found.add(addr)
+        addr += 2 if rom[addr] >> 4 in TWO_BYTE else 1
+    return found
+
+
+async def run_program(dut, name):
+    """Act as the program memory chip: answer every address with the right byte."""
+    rom, _ = assemble(os.path.join(PROGRAMS, name))
+    out_at, halt_at = instruction_addresses(rom, 0xF0), instruction_addresses(rom, 0xF1)
+    memory = rom + [0] * (256 - len(rom))
+
+    dut.rst_n.value = 0
+    dut.ui_in.value = 0
+    await ClockCycles(dut.clk, 5)
+    dut.rst_n.value = 1
+
+    outputs, pending_out = [], False
+    for _ in range(5000):
+        await FallingEdge(dut.clk)
+        if pending_out:
+            outputs.append(int(dut.uio_out.value))
+            pending_out = False
+        addr = int(dut.uo_out.value)
+        if addr in halt_at:
+            break
+        dut.ui_in.value = memory[addr]
+        await RisingEdge(dut.clk)
+        pending_out = addr in out_at
+    else:
+        assert False, f"{name} never halted"
+
+    dut._log.info(f"{name}: {outputs}")
+    return outputs
 
 
 @cocotb.test()
-async def test_project(dut):
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
+async def test_programs(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="us").start())
     dut.ena.value = 1
-    dut.ui_in.value = 0
     dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
 
-    await press(dut, LOAD, 3, 3, 0)
-    await press(dut, ADD, 5, 8, 0)
-    await press(dut, SUB, 2, 6, 0)
-    await press(dut, SHL, 0, 12, 0)
-    await press(dut, SHR, 0, 6, 0)
-    await press(dut, AND, 12, 4, 0)
-    await press(dut, OR, 1, 5, 0)
-    await press(dut, XOR, 5, 0, 0)
-    await press(dut, LOAD, 250, 250, 0)
-    await press(dut, ADD, 10, 4, 1)    # 260 wraps to 4, carry out
-    await press(dut, SUB, 5, 255, 1)   # 4 - 5 wraps to 255, borrow
+    assert await run_program(dut, "fibonacci.asm") == [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233]
+    assert await run_program(dut, "multiply.asm") == [42]
+    assert await run_program(dut, "countdown.asm") == list(range(10, -1, -1))
