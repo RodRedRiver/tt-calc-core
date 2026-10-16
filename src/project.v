@@ -1,11 +1,17 @@
 /*
- * Copyright (c) 2024 Your Name
+ * Copyright (c) 2026 RodRedRiver
  * SPDX-License-Identifier: Apache-2.0
  */
 
 `default_nettype none
 
-module tt_um_example (
+// Adapter between the standard Tiny Tapeout pins and our calculator core.
+//   ui_in[7:0]  -> b (the number you type in)
+//   uio_in[2:0] -> op (which operation)
+//   uio_in[3]   -> go (1 = apply the operation on the next clock tick)
+//   uo_out[7:0] <- acc (the result / display)
+//   uio_out[4]  <- carry, uio_out[5] <- zero
+module tt_um_rodredriver_calc (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // IOs: Input path
@@ -16,12 +22,24 @@ module tt_um_example (
     input  wire       rst_n     // reset_n - low to reset
 );
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+  wire carry, zero;
+
+  calc_core core (
+      .clk  (clk),
+      .rst  (~rst_n),
+      .go   (uio_in[3]),
+      .op   (uio_in[2:0]),
+      .b    (ui_in),
+      .acc  (uo_out),
+      .carry(carry),
+      .zero (zero)
+  );
+
+  // uio[3:0] are inputs (op, go); uio[5:4] are outputs (carry, zero); uio[7:6] unused
+  assign uio_out = {2'b00, zero, carry, 4'b0000};
+  assign uio_oe  = 8'b0011_0000;
 
   // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+  wire _unused = &{ena, uio_in[7:4], 1'b0};
 
 endmodule
